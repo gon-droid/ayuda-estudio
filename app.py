@@ -123,7 +123,7 @@ def call_gemini_with_retry(client, primary_model: str, contents, config: types.G
     Realiza la llamada a la API con reintentos automáticos y cambio de modelo (fallback)
     si el servidor de Google devuelve un error 503 (alta demanda) o 429.
     """
-    fallback_models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.8-pro"]
+    fallback_models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-3.8-pro"]
     # Poner el modelo elegido por el usuario en primer lugar sin duplicar
     models_to_try = [primary_model] + [m for m in fallback_models if m != primary_model]
 
@@ -190,7 +190,7 @@ with st.sidebar:
 
     MODEL_ID = st.selectbox(
         "Modelo de IA preferido:",
-        options=["gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.0-flash"],
+        options=["gemini-3.8-flash", "gemini-3.8-pro"],
         index=0,
         help="Si el modelo elegido experimenta alta demanda (Error 503), la app reintentará automáticamente."
     )
