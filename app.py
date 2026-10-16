@@ -172,11 +172,11 @@ with st.sidebar:
         )
 
     MODEL_ID = st.selectbox(
-        "Modelo de IA:",
-        options=["gemini-2.5-flash", "gemini-2.5-pro"],
-        index=0,
-        help="gemini-2.5-flash es más rápido y económico; gemini-2.5-pro ofrece razonamiento más profundo."
-    )
+    "Modelo de IA:",
+    options=["gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.0-flash"],
+    index=0,
+    help="gemini-3.8-flash es el modelo recomendado actual más rápido; gemini-3.8-pro ofrece razonamiento avanzado."
+)
 
     st.divider()
     st.subheader("📚 Entrada de Material")
