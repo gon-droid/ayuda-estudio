@@ -4,6 +4,7 @@ from google.genai import types
 from google.genai.errors import APIError
 import pypdf
 import json
+import time
 from pydantic import BaseModel
 
 # ==========================================
@@ -16,7 +17,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS personalizados para las Flashcards y la interfaz
 st.markdown("""
 <style>
     .flashcard-box {
@@ -48,13 +48,6 @@ st.markdown("""
         font-weight: 500;
         line-height: 1.5;
     }
-    .score-banner {
-        padding: 15px;
-        border-radius: 10px;
-        background-color: #f1f5f9;
-        border-left: 5px solid #3b82f6;
-        margin-bottom: 20px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,7 +63,7 @@ class OpcionesTest(BaseModel):
 class PreguntaTest(BaseModel):
     pregunta: str
     opciones: OpcionesTest
-    respuesta_correcta: str  # Esperado: "A", "B", "C" o "D"
+    respuesta_correcta: str
     justificaciones: OpcionesTest
 
 class CuestionarioSchema(BaseModel):
@@ -114,10 +107,9 @@ def init_session_state():
 init_session_state()
 
 # ==========================================
-# FUNCIONES AUXILIARES Y CLIENTE API
+# FUNCIONES AUXILIARES Y TOLERANCIA A FALLOS (503)
 # ==========================================
 def get_genai_client(api_key: str):
-    """Inicializa y devuelve el cliente oficial de Google GenAI."""
     if not api_key:
         return None
     try:
@@ -126,19 +118,46 @@ def get_genai_client(api_key: str):
         st.error(f"Error al inicializar el cliente de Google GenAI: {e}")
         return None
 
+def call_gemini_with_retry(client, primary_model: str, contents, config: types.GenerateContentConfig):
+    """
+    Realiza la llamada a la API con reintentos automáticos y cambio de modelo (fallback)
+    si el servidor de Google devuelve un error 503 (alta demanda) o 429.
+    """
+    fallback_models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.8-pro"]
+    # Poner el modelo elegido por el usuario en primer lugar sin duplicar
+    models_to_try = [primary_model] + [m for m in fallback_models if m != primary_model]
+
+    last_error = None
+    for model_name in models_to_try:
+        for attempt in range(2):  # Hasta 2 intentos por modelo
+            try:
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config
+                )
+            except APIError as e:
+                last_error = e
+                err_str = str(e).upper()
+                # Si es sobrecarga temporal (503) o límite de velocidad (429), esperamos y reintentamos
+                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                # Si el modelo no está disponible en esa cuenta (404), pasamos al siguiente modelo de la lista
+                elif "404" in err_str or "NOT_FOUND" in err_str:
+                    break
+                else:
+                    raise e
+    raise last_error
+
 def extract_text_from_file(uploaded_file) -> str:
-    """Extrae el texto plano de un archivo PDF o TXT."""
     try:
         if uploaded_file.type == "application/pdf":
             reader = pypdf.PdfReader(uploaded_file)
-            extracted_pages = []
-            for idx, page in enumerate(reader.pages):
-                page_text = page.extract_text()
-                if page_text:
-                    extracted_pages.append(page_text)
+            extracted_pages = [page.extract_text() for page in reader.pages if page.extract_text()]
             text = "\n\n".join(extracted_pages)
             if not text.strip():
-                st.warning("⚠️ El PDF parece no contener texto seleccionable (podría ser un documento escaneado).")
+                st.warning("⚠️ El PDF parece no contener texto seleccionable.")
             return text
         elif uploaded_file.type == "text/plain":
             return uploaded_file.read().decode("utf-8", errors="ignore")
@@ -152,7 +171,6 @@ def extract_text_from_file(uploaded_file) -> str:
 with st.sidebar:
     st.title("⚙️ Configuración")
     
-    # Gestión de la API Key (st.secrets o input manual)
     default_api_key = ""
     try:
         if "GEMINI_API_KEY" in st.secrets:
@@ -161,22 +179,21 @@ with st.sidebar:
         pass
 
     if default_api_key:
-        st.success("🔑 API Key cargada desde `st.secrets`")
-        use_custom_key = st.checkbox("Usar una API Key diferente")
-        api_key = st.text_input("Introduce tu Gemini API Key:", type="password") if use_custom_key else default_api_key
+        st.success("🔑 API Key activa y conectada")
+        use_custom_key = st.checkbox("Usar mi propia API Key personal")
+        raw_key = st.text_input("Introduce tu Gemini API Key:", type="password") if use_custom_key else default_api_key
     else:
-        api_key = st.text_input(
-            "Introduce tu Gemini API Key:",
-            type="password",
-            help="Obtén tu clave en Google AI Studio (aistudio.google.com)"
-        )
+        st.markdown("👉 **[Consigue tu API Key gratis aquí](https://aistudio.google.com/app/apikey)**")
+        raw_key = st.text_input("Introduce tu Gemini API Key:", type="password")
+
+    api_key = raw_key.strip().strip('"').strip("'") if raw_key else ""
 
     MODEL_ID = st.selectbox(
-    "Modelo de IA:",
-    options=["gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.0-flash"],
-    index=0,
-    help="gemini-3.8-flash es el modelo recomendado actual más rápido; gemini-3.8-pro ofrece razonamiento avanzado."
-)
+        "Modelo de IA preferido:",
+        options=["gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.0-flash"],
+        index=0,
+        help="Si el modelo elegido experimenta alta demanda (Error 503), la app reintentará automáticamente."
+    )
 
     st.divider()
     st.subheader("📚 Entrada de Material")
@@ -208,7 +225,6 @@ with st.sidebar:
             else:
                 st.warning("El campo de texto está vacío.")
 
-    # Estado del material cargado
     if st.session_state.study_text:
         st.divider()
         char_count = len(st.session_state.study_text)
@@ -281,8 +297,9 @@ with tab_quiz:
             {st.session_state.study_text[:65000]}
             """
             try:
-                response = client.models.generate_content(
-                    model=MODEL_ID,
+                response = call_gemini_with_retry(
+                    client=client,
+                    primary_model=MODEL_ID,
                     contents=prompt_quiz,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -295,23 +312,20 @@ with tab_quiz:
                 st.session_state.user_answers = {}
                 st.rerun()
             except APIError as e:
-                st.error(f"Error de la API de Gemini (verifica tu clave o cuota): {e}")
+                st.error(f"Los servidores de Google están saturados en este instante. Por favor, pulsa el botón de nuevo en unos segundos. Detalle: {e}")
             except Exception as e:
                 st.error(f"Error inesperado al generar el cuestionario: {e}")
 
-    # Renderizado de las preguntas
     if st.session_state.quiz_data:
         questions = st.session_state.quiz_data
         total_q = len(questions)
         answered_q = len(st.session_state.user_answers)
         
-        # Cálculo de aciertos en tiempo real
         correct_count = sum(
             1 for idx, ans in st.session_state.user_answers.items()
             if ans == questions[idx]["respuesta_correcta"].strip().upper()
         )
 
-        # Marcador superior dinámico
         st.markdown("---")
         m_col1, m_col2, m_col3 = st.columns(3)
         m_col1.metric("Progreso", f"{answered_q} / {total_q} respondidas")
@@ -329,7 +343,6 @@ with tab_quiz:
 
         st.markdown("---")
 
-        # Listado interactivo de preguntas
         for i, q in enumerate(questions):
             with st.container(border=True):
                 st.subheader(f"Pregunta {i + 1}")
@@ -339,7 +352,6 @@ with tab_quiz:
                 correct_letter = q["respuesta_correcta"].strip().upper()
                 user_choice = st.session_state.user_answers.get(i)
 
-                # Mostrar opciones con botones de selección
                 for letra in ["A", "B", "C", "D"]:
                     texto_opcion = opciones.get(letra, "")
                     col_btn, col_txt = st.columns([1, 11])
@@ -368,7 +380,6 @@ with tab_quiz:
                         else:
                             st.markdown(f"{texto_opcion}")
 
-                # Feedback inmediato y desglose teórico
                 if user_choice is not None:
                     if user_choice == correct_letter:
                         st.success(f"¡Correcto! La opción **{correct_letter}** es la adecuada.")
@@ -412,8 +423,9 @@ with tab_flashcards:
             {st.session_state.study_text[:65000]}
             """
             try:
-                response = client.models.generate_content(
-                    model=MODEL_ID,
+                response = call_gemini_with_retry(
+                    client=client,
+                    primary_model=MODEL_ID,
                     contents=prompt_fc,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -428,7 +440,7 @@ with tab_flashcards:
                 st.session_state.fc_status = {}
                 st.rerun()
             except APIError as e:
-                st.error(f"Error de la API de Gemini: {e}")
+                st.error(f"Alta demanda temporal en Google AI. Inténtalo de nuevo en unos segundos: {e}")
             except Exception as e:
                 st.error(f"Error al generar las tarjetas: {e}")
 
@@ -437,7 +449,6 @@ with tab_flashcards:
         total_cards = len(cards)
         idx = st.session_state.fc_index
 
-        # Contadores de estado
         learned_count = sum(1 for status in st.session_state.fc_status.values() if status == "Aprendida")
         review_count = sum(1 for status in st.session_state.fc_status.values() if status == "Repasar")
         pending_count = total_cards - learned_count - review_count
@@ -449,7 +460,6 @@ with tab_flashcards:
 
         st.markdown("---")
 
-        # Visor interactivo de la tarjeta actual
         current_card = cards[idx]
         current_status = st.session_state.fc_status.get(idx, "Sin clasificar")
         status_badge = "✅ Aprendida" if current_status == "Aprendida" else ("🔄 Repasar" if current_status == "Repasar" else "⚪ Sin clasificar")
@@ -467,7 +477,6 @@ with tab_flashcards:
         </div>
         """, unsafe_allow_html=True)
 
-        # Controles de navegación y volteo
         c_nav1, c_nav2, c_nav3 = st.columns([1, 2, 1])
         with c_nav1:
             if st.button("⬅️ Anterior", disabled=(idx == 0), use_container_width=True):
@@ -485,7 +494,6 @@ with tab_flashcards:
                 st.session_state.fc_flipped = False
                 st.rerun()
 
-        # Botones de clasificación ("Aprendida" / "Repasar")
         st.write("")
         c_mark1, c_mark2 = st.columns(2)
         with c_mark1:
@@ -503,7 +511,6 @@ with tab_flashcards:
                     st.session_state.fc_flipped = False
                 st.rerun()
 
-        # Vista rápida en lista colapsable inferior
         with st.expander("📋 Ver listado completo de tarjetas y su estado"):
             for c_i, card in enumerate(cards):
                 st_i = st.session_state.fc_status.get(c_i, "Pendiente")
@@ -529,8 +536,9 @@ with tab_summary:
             {st.session_state.study_text[:65000]}
             """
             try:
-                response = client.models.generate_content(
-                    model=MODEL_ID,
+                response = call_gemini_with_retry(
+                    client=client,
+                    primary_model=MODEL_ID,
                     contents=prompt_summary,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -541,7 +549,7 @@ with tab_summary:
                 st.session_state.summary_data = json.loads(response.text)
                 st.rerun()
             except APIError as e:
-                st.error(f"Error de la API de Gemini: {e}")
+                st.error(f"Alta demanda temporal en Google AI. Inténtalo de nuevo en unos segundos: {e}")
             except Exception as e:
                 st.error(f"Error al generar el resumen: {e}")
 
@@ -577,7 +585,6 @@ with tab_tutor:
             st.session_state.chat_history = []
             st.rerun()
 
-    # Contenedor para mostrar el historial de mensajes
     chat_container = st.container(height=480)
     with chat_container:
         if not st.session_state.chat_history:
@@ -588,16 +595,13 @@ with tab_tutor:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-    # Entrada de texto del estudiante
     user_query = st.chat_input("Escribe tu duda sobre el temario aquí...")
     if user_query:
-        # Guardar y mostrar el mensaje del usuario
         st.session_state.chat_history.append({"role": "user", "content": user_query})
         with chat_container:
             with st.chat_message("user"):
                 st.markdown(user_query)
 
-            # Preparar el contexto y el historial para el SDK google-genai
             system_instruction = f"""
             Eres un tutor académico pedagógico, cercano y riguroso. Tu objetivo es ayudar al estudiante a comprender el temario cargado.
             
@@ -623,8 +627,9 @@ with tab_tutor:
             with st.chat_message("assistant"):
                 with st.spinner("Consultando apuntes y elaborando respuesta..."):
                     try:
-                        response = client.models.generate_content(
-                            model=MODEL_ID,
+                        response = call_gemini_with_retry(
+                            client=client,
+                            primary_model=MODEL_ID,
                             contents=contents_payload,
                             config=types.GenerateContentConfig(
                                 system_instruction=system_instruction,
@@ -635,6 +640,6 @@ with tab_tutor:
                         st.markdown(assistant_reply)
                         st.session_state.chat_history.append({"role": "assistant", "content": assistant_reply})
                     except APIError as e:
-                        st.error(f"Error de la API de Gemini al procesar tu consulta: {e}")
+                        st.error(f"Alta demanda temporal en Google AI. Por favor, envía tu pregunta de nuevo: {e}")
                     except Exception as e:
                         st.error(f"Ocurrió un error inesperado en el chat: {e}")
